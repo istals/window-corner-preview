@@ -3,7 +3,7 @@
 // Global modules
 const Lang = imports.lang;
 const St = imports.gi.St;
-const Main = imports.ui.main;
+const Util = imports.misc.util;
 const PanelMenu = imports.ui.panelMenu;
 const PopupMenu = imports.ui.popupMenu;
 
@@ -14,6 +14,8 @@ const PopupSliderMenuItem = Me.imports.popupSliderMenuItem.PopupSliderMenuItem;
 const Bundle = Me.imports.bundle;
 const Polygnome = Me.imports.polygnome;
 const Preview = Me.imports.preview;
+
+const DisplayWrapper = Polygnome.DisplayWrapper;
 
 // Utilities
 const getWorkspaceWindowsArray = Polygnome.getWorkspaceWindowsArray;
@@ -80,14 +82,62 @@ var WindowCornerIndicator = new Lang.Class({
         this.preview.emit("crop-changed");
     },
 
+    _onClearCropActivate: function(source) {
+        this.preview.topCrop = 0.0;
+        this.preview.leftCrop = 0.0;
+        this.preview.rightCrop = 0.0;
+        this.preview.bottomCrop = 0.0;
+        this._updateSliders();
+        this.preview.emit("crop-changed");
+    },
+
+    _onCornerActivate: function(source, event, corner) {
+        this.preview.corner = corner;
+        this._updateSliders();
+        this.preview.emit("corner-changed");
+    },
+
+    _onMonitorActivate: function(source, event, monitor) {
+        this.preview.monitor = monitor;
+        this.preview.emit("monitor-changed");
+    },
+
     _onSettings: function() {
-        Main.Util.trySpawnCommandLine("gnome-shell-extension-prefs window-corner-preview@fabiomereu.it");
+        Util.trySpawnCommandLine("gnome-shell-extension-prefs window-corner-preview@fabiomereu.it");
+    },
+
+    _onWindowActivate: function() {
+        if (this.preview.window) {
+            this.preview.window.activate(global.get_current_time());
+        }
     },
 
     // Update windows list and other menus before menu pops up
     _onUserTriggered: function() {
         this.menuIsEnabled.setToggleState(this.preview.visible);
         this.menuIsEnabled.actor.reactive = this.preview.window;
+        this.menuActivate.actor.visible = this.preview.visible;
+        this.menuActivate.label.set_text(
+            ["◪", "⬕", "◩", "⬔"][this.preview.corner] + " " +
+            spliceTitle(this.preview.window && this.preview.window.get_title())
+        );
+        this.menuTopLeftCorner.label.set_text(
+            (this.preview.corner == 0 ? "⬉" : "⬁") + "\t" +
+            "Top Left"
+        );
+        this.menuTopRightCorner.label.set_text(
+            (this.preview.corner == 1 ? "⬈" : "⬀") + "\t" +
+            "Top Right"
+        );
+        this.menuBottomRightCorner.label.set_text(
+            (this.preview.corner == 2 ? "⬊" : "⬂") + "\t" +
+            "Bottom Right"
+        );
+        this.menuBottomLeftCorner.label.set_text(
+            (this.preview.corner == 3 ? "⬋" : "⬃") + "\t" +
+            "Bottom Left"
+        );
+        this._drawMonitorMenu();
         this._updateSliders()
         this.menuWindows.menu.removeAll();
         getWorkspaceWindowsArray().forEach(function(workspace, i) {
@@ -108,6 +158,16 @@ var WindowCornerIndicator = new Lang.Class({
         }, this);
     },
 
+    _drawMonitorMenu() {
+        this.menuMonitor.menu.removeAll();
+        for(let i=0; i < DisplayWrapper.getScreen().get_n_monitors(); i++) {
+            let active = (this.preview.monitor == i) ? '> ' : '';
+            let element = new PopupMenu.PopupMenuItem(`${active} monitor ${i}`, true);
+            element.connect("activate", Lang.bind(this, this._onMonitorActivate, i));
+            this.menuMonitor.menu.addMenuItem(element);
+        }
+    },
+
     enable: function() {
 
         // Add icon
@@ -115,9 +175,15 @@ var WindowCornerIndicator = new Lang.Class({
             icon_name: "face-monkey-symbolic",
             style_class: "system-status-icon"
         });
-        this.actor.add_actor(this.icon);
+        this.add_actor(this.icon);
 
         // Prepare Menu...
+
+        // 1. Active Monitor
+        this.menuIsEnabled = new PopupMenu.PopupSwitchMenuItem("Preview", false, {
+            hover: false,
+            reactive: true
+        });
 
         // 1. Preview ON/OFF
         this.menuIsEnabled = new PopupMenu.PopupSwitchMenuItem("Preview", false, {
@@ -126,6 +192,12 @@ var WindowCornerIndicator = new Lang.Class({
         });
         this.menuIsEnabled.connect("toggled", Lang.bind(this, this._onMenuIsEnabled));
         this.menu.addMenuItem(this.menuIsEnabled);
+        this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+
+        // 1.5 Activate Mirrored window
+        this.menuActivate = new PopupMenu.PopupMenuItem("Activate");
+        this.menuActivate.connect("activate", Lang.bind(this, this._onWindowActivate));
+        this.menu.addMenuItem(this.menuActivate);
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
 
         // 2. Windows list
@@ -142,7 +214,7 @@ var WindowCornerIndicator = new Lang.Class({
 
         // 3b, Zoom slider
         this.menuZoom = new PopupSliderMenuItem(false, DEFAULT_ZOOM, MIN_ZOOM, MAX_ZOOM, 0.005); // slider step: 0.5%
-        this.menuZoom.connect("value-changed", Lang.bind(this, this._onZoomChanged));
+        this.menuZoom.connect("notify::value", Lang.bind(this, this._onZoomChanged));
         this.menu.addMenuItem(this.menuZoom);
 
         // 4. Crop Sliders
@@ -150,28 +222,60 @@ var WindowCornerIndicator = new Lang.Class({
         this.menu.addMenuItem(this.menuCrop);
 
         this.menuTopCrop = new PopupSliderMenuItem("Top", DEFAULT_CROP_RATIO, 0.0, MAX_CROP_RATIO);
-        this.menuTopCrop.connect("value-changed", Lang.bind(this, this._onTopCropChanged));
+        this.menuTopCrop.connect("notify::value", Lang.bind(this, this._onTopCropChanged));
         this.menuCrop.menu.addMenuItem(this.menuTopCrop);
 
         this.menuLeftCrop = new PopupSliderMenuItem("Left", DEFAULT_CROP_RATIO, 0.0, MAX_CROP_RATIO);
-        this.menuLeftCrop.connect("value-changed", Lang.bind(this, this._onLeftCropChanged));
+        this.menuLeftCrop.connect("notify::value", Lang.bind(this, this._onLeftCropChanged));
         this.menuCrop.menu.addMenuItem(this.menuLeftCrop);
 
         this.menuRightCrop = new PopupSliderMenuItem("Right", DEFAULT_CROP_RATIO, 0.0, MAX_CROP_RATIO);
-        this.menuRightCrop.connect("value-changed", Lang.bind(this, this._onRightCropChanged));
+        this.menuRightCrop.connect("notify::value", Lang.bind(this, this._onRightCropChanged));
         this.menuCrop.menu.addMenuItem(this.menuRightCrop);
 
         this.menuBottomCrop = new PopupSliderMenuItem("Bottom", DEFAULT_CROP_RATIO, 0.0, MAX_CROP_RATIO);
-        this.menuBottomCrop.connect("value-changed", Lang.bind(this, this._onBottomCropChanged));
+        this.menuBottomCrop.connect("notify::value", Lang.bind(this, this._onBottomCropChanged));
         this.menuCrop.menu.addMenuItem(this.menuBottomCrop);
+
+        this.menuClearCrop = new PopupMenu.PopupMenuItem("Clear");
+        this.menuClearCrop.connect("activate", Lang.bind(this, this._onClearCropActivate));
+        this.menuCrop.menu.addMenuItem(this.menuClearCrop);
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
 
-        // 5. Settings
+        // 5. Corner
+        this.menuCorner = new PopupMenu.PopupSubMenuMenuItem("Corner");
+        this.menu.addMenuItem(this.menuCorner);
+        this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+
+        this.menuTopRightCorner = new PopupMenu.PopupMenuItem("");
+        this.menuTopRightCorner.connect("activate", Lang.bind(this, this._onCornerActivate, 1));
+        this.menuCorner.menu.addMenuItem(this.menuTopRightCorner);
+
+        this.menuBottomRightCorner = new PopupMenu.PopupMenuItem("");
+        this.menuBottomRightCorner.connect("activate", Lang.bind(this, this._onCornerActivate, 2));
+        this.menuCorner.menu.addMenuItem(this.menuBottomRightCorner);
+
+        this.menuBottomLeftCorner = new PopupMenu.PopupMenuItem("");
+        this.menuBottomLeftCorner.connect("activate", Lang.bind(this, this._onCornerActivate, 3));
+        this.menuCorner.menu.addMenuItem(this.menuBottomLeftCorner);
+
+        this.menuTopLeftCorner = new PopupMenu.PopupMenuItem("");
+        this.menuTopLeftCorner.connect("activate", Lang.bind(this, this._onCornerActivate, 0));
+        this.menuCorner.menu.addMenuItem(this.menuTopLeftCorner);
+
+        // Active Monitor
+        this.menuMonitor = new PopupMenu.PopupSubMenuMenuItem("Monitor");
+        this.menu.addMenuItem(this.menuMonitor);
+        this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+        this._drawMonitorMenu()
+
+
+        // 6. Settings
         this.menuSettings = new PopupMenu.PopupMenuItem("Settings");
         this.menuSettings.connect("activate", Lang.bind(this, this._onSettings));
         this.menu.addMenuItem(this.menuSettings);
 
-        this.actor.connect("enter-event", Lang.bind(this, this._onUserTriggered));
+        this.connect("enter-event", Lang.bind(this, this._onUserTriggered));
 
     },
 

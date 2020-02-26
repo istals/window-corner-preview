@@ -10,6 +10,7 @@ const Me = ExtensionUtils.getCurrentExtension();
 const Convenience = Me.imports.convenience;
 
 // Schema keys
+var SETTING_ACTIVE_MONITOR = "active-monitor";
 var SETTING_BEHAVIOR_MODE = "behavior-mode";
 var SETTING_FOCUS_HIDDEN = "focus-hidden";
 var SETTING_INITIAL_ZOOM = "initial-zoom";
@@ -107,7 +108,15 @@ var WindowCornerSettings = new Lang.Class({
 
     set lastWindowHash(value) {
         this._settings.set_string(SETTING_LAST_WINDOW_HASH, value);
-    }
+    },
+
+    get activeMonitor() {
+        return this._settings.get_string(SETTING_ACTIVE_MONITOR);
+    },
+
+    set activeMonitor(value) {
+        this._settings.set_string(SETTING_ACTIVE_MONITOR, value);
+    },
 });
 
 Signals.addSignalMethods(WindowCornerSettings.prototype);

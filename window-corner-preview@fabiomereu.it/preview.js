@@ -13,9 +13,13 @@ const ExtensionUtils = imports.misc.extensionUtils;
 const Me = ExtensionUtils.getCurrentExtension();
 const Polygnome = Me.imports.polygnome;
 const Signaling = Me.imports.signaling;
+const Sensitive = Me.imports.sensitive;
+const Shape = Me.imports.shape;
 
 const DisplayWrapper = Polygnome.DisplayWrapper;
 const SignalConnector = Signaling.SignalConnector;
+const SensitiveArea = Sensitive.Area;
+const Rectangle = Shape.Rectangle;
 
 // At the moment magnification hasn't been tested and it's clumsy
 const SETTING_MAGNIFICATION_ALLOWED = false;
@@ -57,12 +61,18 @@ const GDK_CONTROL_MASK = 4;
 const GDK_MOD1_MASK = 8;
 const GDK_ALT_MASK = GDK_MOD1_MASK; // Most cases
 
+const BEHAVIOR_SEETHROUGH = "seethrough";
+const BEHAVIOR_AUTOHIDE = "autohide";
+const BEHAVIOR_LIST = [BEHAVIOR_SEETHROUGH, BEHAVIOR_AUTOHIDE];
+const DEFAULT_BEHAVIOR = BEHAVIOR_SEETHROUGH;
+
 var WindowCornerPreview = new Lang.Class({
 
     Name: "WindowCornerPreview.preview",
 
     _init: function() {
 
+        this._monitor = DisplayWrapper.getScreen().get_current_monitor();
         this._corner = DEFAULT_CORNER;
         this._zoom = DEFAULT_ZOOM;
 
@@ -70,6 +80,8 @@ var WindowCornerPreview = new Lang.Class({
         this._rightCrop = DEFAULT_CROP_RATIO;
         this._topCrop = DEFAULT_CROP_RATIO;
         this._bottomCrop = DEFAULT_CROP_RATIO;
+
+        this._behaviorMode = DEFAULT_BEHAVIOR;
 
         // The following properties are documented on _adjustVisibility()
         this._naturalVisibility = false;
@@ -81,15 +93,15 @@ var WindowCornerPreview = new Lang.Class({
         this._windowSignals = new SignalConnector();
         this._environmentSignals = new SignalConnector();
 
-        this._handleZoomChange = null;
+        this._outsideArea = new SensitiveArea();
     },
 
     _onClick: function(actor, event) {
         let button = event.get_button();
         let state = event.get_state();
 
-        // CTRL + LEFT BUTTON activate the window on top
-        if (button === GTK_MOUSE_LEFT_BUTTON && (state & GDK_CONTROL_MASK)) {
+        // SHIFT + LEFT BUTTON activate the window on top
+        if (button === GTK_MOUSE_LEFT_BUTTON && (state & GDK_SHIFT_MASK)) {
             this._window.activate(global.get_current_time());
         }
 
@@ -109,6 +121,16 @@ var WindowCornerPreview = new Lang.Class({
             }
             this.emit("corner-changed");
         }
+    },
+
+    _getRectangle: function() {
+        if (! this._container)
+            return new Rectangle();
+
+        const [x, y] = this._container.get_transformed_position();
+        const [width, height] = this._container.get_transformed_size();
+
+        return new Rectangle(x, y, width, height);
     },
 
     _onScroll: function(actor, event) {
@@ -143,11 +165,10 @@ var WindowCornerPreview = new Lang.Class({
         // Coords are absolute, screen related
         let [mouseX, mouseY] = event.get_coords();
 
-        // _container absolute rect
-        let [actorX1, actorY1] = this._container.get_transformed_position();
-        let [actorWidth, actorHeight] = this._container.get_transformed_size();
-        let actorX2 = actorX1 + actorWidth;
-        let actorY2 = actorY1 + actorHeight;
+        const actorRect = this._getRectangle();
+        const [actorX1, actorY1, actorX2, actorY2] = actorRect.getXY();
+        const actorWidth = actorRect.width;
+        const actorHeight = actorRect.height;
 
         // Distance of pointer from each side
         let deltaLeft = Math.abs(actorX1 - mouseX);
@@ -206,19 +227,37 @@ var WindowCornerPreview = new Lang.Class({
             return; // Clutter.EVENT_PROPAGATE;
         }
 
-        Tweener.addTween(this._container, {
-            opacity: TWEEN_OPACITY_TENTH,
-            time: TWEEN_TIME_MEDIUM,
-            transition: "easeOutQuad"
-        });
+        if (this._behaviorMode === BEHAVIOR_AUTOHIDE) {
+            const rectangle = this._getRectangle();
+            this._outsideArea.tester = function (x, y) {
+                return !rectangle.isPointInside(x, y);
+            }
+            this._autohidden = true;
+            this._adjustVisibility();
+        }
+
+        else { // BEHAVIOR_SEETHROUGH
+            Tweener.addTween(this._container, {
+                opacity: TWEEN_OPACITY_TENTH,
+                time: TWEEN_TIME_MEDIUM,
+                transition: "easeOutQuad"
+            });
+        }
     },
 
     _onLeave: function() {
-        Tweener.addTween(this._container, {
-            opacity: TWEEN_OPACITY_FULL,
-            time: TWEEN_TIME_MEDIUM,
-            transition: "easeOutQuad"
-        });
+
+        if (this._behaviorMode === BEHAVIOR_AUTOHIDE) {
+            this._autohidden = false;
+            this._adjustVisibility();
+        }
+        else { // BEHAVIOR_SEETHROUGH
+            Tweener.addTween(this._container, {
+                opacity: TWEEN_OPACITY_FULL,
+                time: TWEEN_TIME_MEDIUM,
+                transition: "easeOutQuad"
+            });
+        }
     },
 
     _onParamsChange: function() {
@@ -238,10 +277,15 @@ var WindowCornerPreview = new Lang.Class({
 
         /*
             [Boolean] this._naturalVisibility:
-                        true === show the preview whenever is possible;
-                        false === don't show it in any case
+                        true === .show() or similar was called programatically;
+                        false === .hide() or similar was called programatically;
+
             [Boolean] this._focusHidden:
                         true === hide in case the mirrored window should be active
+
+            [Booleant] this._autohidden: (only in BEHAVIOR_AUTOHIDE)
+                        true === assume the pointer moving on the preview area;
+                        false === assume the pointer outside the preview space;
 
             options = {
                 onComplete: [function] to call once the process is done.
@@ -265,7 +309,8 @@ var WindowCornerPreview = new Lang.Class({
         let calculatedVisibility = this._window &&
             this._naturalVisibility &&
             canBeShownOnFocus &&
-            (! Main.overview.visibleTarget);
+            (! Main.overview.visibleTarget) &&
+            !(this._behaviorMode === BEHAVIOR_AUTOHIDE && this._autohidden);
 
         let calculatedOpacity = (calculatedVisibility) ? TWEEN_OPACITY_FULL : TWEEN_OPACITY_NULL;
 
@@ -328,7 +373,7 @@ var WindowCornerPreview = new Lang.Class({
 
         let posX, posY;
 
-        let rectMonitor = Main.layoutManager.getWorkAreaForMonitor(DisplayWrapper.getScreen().get_current_monitor());
+        let rectMonitor = Main.layoutManager.getWorkAreaForMonitor(this._monitor);
 
         let rectChrome = {
             x1: rectMonitor.x,
@@ -372,12 +417,19 @@ var WindowCornerPreview = new Lang.Class({
 
         if (! this._window) return;
 
-        let mutw = this._window.get_compositor_private();
+        let compositor = this._window.get_compositor_private();
 
-        if (! mutw) return;
+        if (! compositor) return;
 
-        let windowTexture = mutw.get_texture();
-        let [windowWidth, windowHeight] = windowTexture.get_size();
+        let windowTexture = compositor.get_texture();
+        let windowWidth, windowHeight = 0;
+
+        if (windowTexture.get_size) {
+            [windowWidth, windowHeight] = windowTexture.get_size();
+        } else {
+            let preferred_size_ok
+            [preferred_size_ok, windowWidth, windowHeight] = windowTexture.get_preferred_size();
+        }
 
         /* To crop the window texture, for now I've found that:
            1. Using a clip rect on Clutter.clone will hide the outside portion but also will KEEP the space along it
@@ -421,7 +473,7 @@ var WindowCornerPreview = new Lang.Class({
         }
 
         let thumbnail = new Clutter.Clone({ // list parameters https://www.roojs.org/seed/gir-1.2-gtk-3.0/seed/Clutter.Clone.html
-            source: windowTexture,
+            source: windowTexture.get_size ? windowTexture : compositor,
             reactive: false,
 
             magnification_filter: Clutter.ScalingFilter.NEAREST, //NEAREST, //TRILINEAR,
@@ -509,6 +561,21 @@ var WindowCornerPreview = new Lang.Class({
         return this._focusHidden;
     },
 
+    set behaviorMode(value) {
+        if (BEHAVIOR_LIST.indexOf(value) > -1) {
+            this._behaviorMode = value;
+            this._autohidden = false;
+            this._adjustVisibility();
+        }
+        else {
+            logError(new Error(value), "Preview.behaviorMode: type mismatch");
+        }
+    },
+
+    get behaviorMode() {
+        return this._behaviorMode || DEFAULT_BEHAVIOR;
+    },
+
     set corner(value) {
         this._corner = (value %= 4) < 0 ? (value + 4) : (value);
         this._setPosition();
@@ -552,6 +619,15 @@ var WindowCornerPreview = new Lang.Class({
         this._adjustVisibility({
             onComplete: Lang.bind(this, this.disable)
         });
+    },
+
+    get monitor() {
+        return this._monitor;
+    },
+
+    set monitor(value) {
+        this._monitor = value;
+        this._setPosition();
     },
 
     get window() {
@@ -598,6 +674,7 @@ var WindowCornerPreview = new Lang.Class({
 
         this._container.connect("enter-event", Lang.bind(this, this._onEnter));
         this._container.connect("leave-event", Lang.bind(this, this._onLeave));
+        this._outsideArea.connect("enter-event", Lang.bind(this, this._onLeave));
         // Don't use button-press-event, as set_position conflicts and Gtk would react for enter and leave event of ANY item on the chrome area
         this._container.connect("button-release-event", Lang.bind(this, this._onClick));
         this._container.connect("scroll-event", Lang.bind(this, this._onScroll));
@@ -605,17 +682,17 @@ var WindowCornerPreview = new Lang.Class({
         this._container.visible = false;
         Main.layoutManager.addChrome(this._container);
 
-        return;
         // isSwitchingWindow = false means user only changed window, but preview was on, so does not animate
-        this._adjustVisibility({
-            noAnimate: isSwitchingWindow
-        });
+        // this._adjustVisibility({
+        //      noAnimate: isSwitchingWindow
+        // });
     },
 
     disable: function() {
 
         this._windowSignals.disconnectAll();
         this._environmentSignals.disconnectAll();
+        this._outsideArea.tester = null;
 
         if (! this._container) return;
 
